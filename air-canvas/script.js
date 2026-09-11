@@ -1,0 +1,409 @@
+/* =========================================================================
+   AirCanvas — script.js
+   Wires up MediaPipe Hands + webcam + canvas drawing.
+   ========================================================================= */
+
+// ---------- DOM REFERENCES ----------
+const videoEl        = document.getElementById('video');
+const canvasEl        = document.getElementById('drawCanvas');
+const ctx             = canvasEl.getContext('2d', { willReadFrequently: true });
+const stageEl         = document.getElementById('stage');
+const cursorDotEl     = document.getElementById('cursorDot');
+const loadingOverlay  = document.getElementById('loadingOverlay');
+const loadingText     = document.getElementById('loadingText');
+
+const statusDot   = document.getElementById('statusDot');
+const statusText  = document.getElementById('statusText');
+
+const penBtn      = document.getElementById('penBtn');
+const eraserBtn   = document.getElementById('eraserBtn');
+const paletteEl   = document.getElementById('palette');
+const colorPicker = document.getElementById('colorPicker');
+const brushSizeInput = document.getElementById('brushSize');
+const brushSizeLabel = document.getElementById('brushSizeLabel');
+const brushPreview   = document.getElementById('brushPreview');
+
+const undoBtn  = document.getElementById('undoBtn');
+const redoBtn  = document.getElementById('redoBtn');
+const clearBtn = document.getElementById('clearBtn');
+const saveBtn  = document.getElementById('saveBtn');
+
+// ---------- APP STATE ----------
+let currentTool  = 'pen';        // 'pen' | 'eraser'
+let currentColor = '#38bdf8';
+let currentBrushSize = 8;
+
+let lastPoint = null;            // last drawn point (canvas pixel coords)
+let isDrawingStroke = false;     // are we mid-stroke right now?
+let missedFrames = 0;            // consecutive frames with no hand detected
+const MISSED_FRAMES_THRESHOLD = 4; // debounce so single-frame glitches don't break strokes
+
+let smoothX = null, smoothY = null;
+const SMOOTHING = 0.5; // 0 = no smoothing, closer to 1 = heavier smoothing (Requirement 11)
+
+const undoStack = [];
+const redoStack = [];
+const HISTORY_LIMIT = 25;
+
+const PALETTE_COLORS = [
+  '#f8fafc', '#f43f5e', '#f97316', '#facc15',
+  '#22c55e', '#38bdf8', '#6366f1', '#a855f7',
+  '#ec4899', '#14b8a6', '#eab308', '#111827'
+];
+
+// ===========================================================================
+// 1. TOOLBAR SETUP
+// ===========================================================================
+
+function buildPalette() {
+  PALETTE_COLORS.forEach((color, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'swatch';
+    btn.style.background = color;
+    btn.title = color;
+    if (i === 5) btn.classList.add('active'); // default matches currentColor
+    btn.addEventListener('click', () => {
+      currentColor = color;
+      colorPicker.value = color;
+      document.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
+      btn.classList.add('active');
+      updateBrushPreview();
+    });
+    paletteEl.appendChild(btn);
+  });
+}
+
+function updateBrushPreview() {
+  const size = Math.min(currentBrushSize, 40);
+  brushPreview.style.width = size + 'px';
+  brushPreview.style.height = size + 'px';
+  brushPreview.style.background = currentTool === 'eraser' ? '#ffffff33' : currentColor;
+  brushPreview.style.border = currentTool === 'eraser' ? '2px solid var(--danger)' : 'none';
+}
+
+function setTool(tool) {
+  currentTool = tool;
+  penBtn.classList.toggle('active', tool === 'pen');
+  eraserBtn.classList.toggle('active', tool === 'eraser');
+  updateBrushPreview();
+}
+
+penBtn.addEventListener('click', () => setTool('pen'));
+eraserBtn.addEventListener('click', () => setTool('eraser'));
+
+colorPicker.addEventListener('input', (e) => {
+  currentColor = e.target.value;
+  document.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
+  updateBrushPreview();
+});
+
+brushSizeInput.addEventListener('input', (e) => {
+  currentBrushSize = parseInt(e.target.value, 10);
+  brushSizeLabel.textContent = currentBrushSize + 'px';
+  updateBrushPreview();
+});
+
+undoBtn.addEventListener('click', undo);
+redoBtn.addEventListener('click', redo);
+clearBtn.addEventListener('click', clearCanvas);
+saveBtn.addEventListener('click', saveDrawing);
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'p' || e.key === 'P') setTool('pen');
+  if (e.key === 'e' || e.key === 'E') setTool('eraser');
+  if (e.key === 'c' || e.key === 'C') clearCanvas();
+  if (e.key === '[') brushSizeInput.stepDown(2), brushSizeInput.dispatchEvent(new Event('input'));
+  if (e.key === ']') brushSizeInput.stepUp(2), brushSizeInput.dispatchEvent(new Event('input'));
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+  if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
+    e.preventDefault(); redo();
+  }
+});
+
+buildPalette();
+updateBrushPreview();
+
+// ===========================================================================
+// 2. UNDO / REDO / CLEAR / SAVE (Requirement 8)
+// ===========================================================================
+
+function pushHistory() {
+  if (undoStack.length >= HISTORY_LIMIT) undoStack.shift();
+  undoStack.push(ctx.getImageData(0, 0, canvasEl.width, canvasEl.height));
+  redoStack.length = 0; // new action invalidates redo history
+}
+
+function undo() {
+  if (undoStack.length === 0) return;
+  redoStack.push(ctx.getImageData(0, 0, canvasEl.width, canvasEl.height));
+  const prev = undoStack.pop();
+  ctx.putImageData(prev, 0, 0);
+}
+
+function redo() {
+  if (redoStack.length === 0) return;
+  undoStack.push(ctx.getImageData(0, 0, canvasEl.width, canvasEl.height));
+  const next = redoStack.pop();
+  ctx.putImageData(next, 0, 0);
+}
+
+function clearCanvas() {
+  pushHistory();
+  ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+}
+
+function saveDrawing() {
+  // Composite the (transparent) drawing onto a white background so the
+  // exported PNG looks clean when opened in any viewer.
+  const exportCanvas = document.createElement('canvas');
+  exportCanvas.width = canvasEl.width;
+  exportCanvas.height = canvasEl.height;
+  const exportCtx = exportCanvas.getContext('2d');
+  exportCtx.fillStyle = '#ffffff';
+  exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+  exportCtx.drawImage(canvasEl, 0, 0);
+
+  const link = document.createElement('a');
+  link.download = `aircanvas-${Date.now()}.png`;
+  link.href = exportCanvas.toDataURL('image/png');
+  link.click();
+}
+
+// ===========================================================================
+// 3. CANVAS SIZING — set bitmap resolution ONCE from the real video size.
+//    We never change canvasEl.width/height again on window resize, because
+//    doing so would clear the drawing. Only CSS (display) size is responsive.
+// ===========================================================================
+
+function sizeCanvasToVideo() {
+  const w = videoEl.videoWidth;
+  const h = videoEl.videoHeight;
+  if (!w || !h) return;
+  canvasEl.width = w;
+  canvasEl.height = h;
+  stageEl.style.aspectRatio = `${w} / ${h}`;
+}
+
+// ===========================================================================
+// 4. GESTURE + FINGERTIP LOGIC
+// ===========================================================================
+
+// MediaPipe Hands landmark indices we need
+const INDEX_TIP = 8,  INDEX_PIP = 6;
+const MIDDLE_TIP = 12, MIDDLE_PIP = 10;
+const RING_TIP = 16,  RING_PIP = 14;
+const PINKY_TIP = 20, PINKY_PIP = 18;
+
+// A finger counts as "up" if its tip is above its pip joint (smaller y).
+// This is a lightweight heuristic that works well when the hand is held
+// roughly upright toward the camera — good enough for a live demo.
+function isFingerUp(landmarks, tipIdx, pipIdx) {
+  return landmarks[tipIdx].y < landmarks[pipIdx].y;
+}
+
+function detectGesture(landmarks) {
+  const indexUp  = isFingerUp(landmarks, INDEX_TIP, INDEX_PIP);
+  const middleUp = isFingerUp(landmarks, MIDDLE_TIP, MIDDLE_PIP);
+  const ringUp   = isFingerUp(landmarks, RING_TIP, RING_PIP);
+  const pinkyUp  = isFingerUp(landmarks, PINKY_TIP, PINKY_PIP);
+
+  if (indexUp && !middleUp && !ringUp && !pinkyUp) return 'draw';   // ☝️
+  if (indexUp && middleUp) return 'hover';                          // ✌️
+  return 'idle';                                                    // ✊ / anything else
+}
+
+function getIndexTipPixel(landmarks) {
+  return {
+    x: landmarks[INDEX_TIP].x * canvasEl.width,
+    y: landmarks[INDEX_TIP].y * canvasEl.height
+  };
+}
+
+function smoothPoint(point) {
+  if (smoothX === null) {
+    smoothX = point.x;
+    smoothY = point.y;
+  } else {
+    smoothX = smoothX * SMOOTHING + point.x * (1 - SMOOTHING);
+    smoothY = smoothY * SMOOTHING + point.y * (1 - SMOOTHING);
+  }
+  return { x: smoothX, y: smoothY };
+}
+
+function resetTrackingState() {
+  lastPoint = null;
+  smoothX = null;
+  smoothY = null;
+}
+
+// ===========================================================================
+// 5. DRAWING
+// ===========================================================================
+
+function handleDrawing(point, gesture) {
+  if (gesture === 'draw') {
+    const isEraser = currentTool === 'eraser';
+    const width = isEraser ? currentBrushSize * 2.5 : currentBrushSize;
+
+    // First frame of a brand-new stroke -> save undo checkpoint
+    if (!isDrawingStroke) {
+      pushHistory();
+      isDrawingStroke = true;
+    }
+
+    ctx.globalCompositeOperation = isEraser ? 'destination-out' : 'source-over';
+    ctx.strokeStyle = currentColor;
+    ctx.fillStyle = currentColor;
+    ctx.lineWidth = width;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    if (lastPoint) {
+      ctx.beginPath();
+      ctx.moveTo(lastPoint.x, lastPoint.y);
+      ctx.lineTo(point.x, point.y);
+      ctx.stroke();
+    } else {
+      // First point of the stroke (or first point after hand reappeared) —
+      // draw a dot instead of a line so we never connect to a stale point
+      // (Requirement 12).
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, width / 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    lastPoint = point;
+  } else {
+    // Not actively drawing this frame -> end the current stroke (if any)
+    if (isDrawingStroke) isDrawingStroke = false;
+    lastPoint = null; // prevents an accidental line next time drawing resumes
+  }
+}
+
+// ===========================================================================
+// 6. STATUS + CURSOR UI
+// ===========================================================================
+
+function updateStatus(state) {
+  statusDot.className = 'status-dot';
+  switch (state) {
+    case 'none':
+      statusDot.classList.add('dot-none');
+      statusText.textContent = 'Hand not detected';
+      break;
+    case 'hover':
+      statusDot.classList.add('dot-hover');
+      statusText.textContent = 'Hand detected — Hover';
+      break;
+    case 'draw':
+      statusDot.classList.add('dot-draw');
+      statusText.textContent = currentTool === 'eraser' ? 'Eraser mode' : 'Drawing mode';
+      break;
+  }
+}
+
+function updateCursor(point, gesture) {
+  cursorDotEl.style.transform = `translate(${point.x - 9}px, ${point.y - 9}px)`;
+  cursorDotEl.classList.remove('mode-draw', 'mode-hover', 'mode-erase');
+  if (gesture === 'draw') {
+    cursorDotEl.classList.add(currentTool === 'eraser' ? 'mode-erase' : 'mode-draw');
+    cursorDotEl.style.opacity = 0.9;
+  } else if (gesture === 'hover') {
+    cursorDotEl.classList.add('mode-hover');
+    cursorDotEl.style.opacity = 0.85;
+  } else {
+    cursorDotEl.style.opacity = 0;
+  }
+}
+
+function hideCursor() {
+  cursorDotEl.style.opacity = 0;
+}
+
+// ===========================================================================
+// 7. MEDIAPIPE HANDS RESULTS CALLBACK
+// ===========================================================================
+
+function onResults(results) {
+  const hasHand = results.multiHandLandmarks && results.multiHandLandmarks.length > 0;
+
+  if (hasHand) {
+    missedFrames = 0;
+    const landmarks = results.multiHandLandmarks[0];
+    const gesture = detectGesture(landmarks);
+
+    const rawPoint = getIndexTipPixel(landmarks);
+    const point = smoothPoint(rawPoint);
+
+    updateCursor(point, gesture);
+    handleDrawing(point, gesture);
+    updateStatus(gesture === 'idle' ? 'hover' : gesture); // treat idle like a paused hover visually
+    if (gesture === 'idle') updateStatus('hover'), (statusText.textContent = 'Hand detected — Idle');
+  } else {
+    missedFrames++;
+    // Only treat the hand as truly gone after a few consecutive misses,
+    // so a single dropped frame doesn't break an in-progress stroke.
+    if (missedFrames >= MISSED_FRAMES_THRESHOLD) {
+      if (isDrawingStroke) isDrawingStroke = false;
+      resetTrackingState();
+      hideCursor();
+      updateStatus('none');
+    }
+  }
+}
+
+// ===========================================================================
+// 8. CAMERA + MEDIAPIPE INITIALIZATION
+// ===========================================================================
+
+async function initApp() {
+  // Basic environment checks up front for a clearer error message than
+  // whatever MediaPipe/getUserMedia would throw natively.
+  const isSecure = location.protocol === 'https:' ||
+                    location.hostname === 'localhost' ||
+                    location.hostname === '127.0.0.1';
+  if (!isSecure) {
+    loadingText.textContent =
+      'Camera access needs HTTPS or localhost. Open this project with a local server (see VS Code instructions) instead of double-clicking index.html.';
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    loadingText.textContent = 'This browser does not support webcam access. Try the latest Chrome or Edge.';
+    return;
+  }
+
+  const hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  });
+
+  hands.setOptions({
+    maxNumHands: 1,              // Requirement 3: detect one hand
+    modelComplexity: 1,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.7
+  });
+
+  hands.onResults(onResults);
+
+  videoEl.addEventListener('loadedmetadata', sizeCanvasToVideo);
+  videoEl.addEventListener('playing', () => {
+    loadingOverlay.classList.add('hidden');
+  });
+
+  const camera = new Camera(videoEl, {
+    onFrame: async () => {
+      await hands.send({ image: videoEl });
+    },
+    width: 640,
+    height: 480
+  });
+
+  try {
+    await camera.start();
+  } catch (err) {
+    console.error('Camera error:', err);
+    loadingText.textContent =
+      'Could not access the webcam. Please allow camera permission in your browser and reload the page.';
+  }
+}
+
+initApp();

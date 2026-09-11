@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AirCanvas — Draw in the Air</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ===== HERO / HEADER SECTION (Requirement 14) ===== -->
+  <header class="hero">
+    <div class="hero-inner">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <span class="brand-name">AirCanvas</span>
+      </div>
+      <h1>Draw in the Air — <span class="accent">Your Finger Is the Brush</span></h1>
+      <p class="hero-sub">
+        Point your index finger at the webcam and move it. AirCanvas tracks your
+        fingertip in real time using MediaPipe Hands and turns it into a digital
+        brush stroke — no stylus, no mouse, no backend.
+      </p>
+    </div>
+  </header>
+
+  <main class="app">
+
+    <!-- ===== CAMERA + DRAWING STAGE ===== -->
+    <section class="stage-panel">
+      <div class="stage" id="stage">
+
+        <!-- mirror-wrap flips video + canvas together via CSS so their
+             coordinate systems always stay aligned (see script.js notes) -->
+        <div class="mirror-wrap" id="mirrorWrap">
+          <video id="video" autoplay playsinline muted></video>
+          <canvas id="drawCanvas"></canvas>
+          <div id="cursorDot" class="cursor-dot"></div>
+        </div>
+
+        <div class="loading-overlay" id="loadingOverlay">
+          <div class="spinner"></div>
+          <p id="loadingText">Starting camera &amp; loading hand-tracking model…</p>
+        </div>
+      </div>
+
+      <!-- ===== STATUS INDICATOR (Requirement 10) ===== -->
+      <div class="status-bar">
+        <div class="status-badge" id="statusBadge">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="statusText">Hand not detected</span>
+        </div>
+        <div class="gesture-guide">
+          <span><strong>☝️ Index only</strong> — Draw / Erase</span>
+          <span><strong>✌️ Index + Middle</strong> — Hover (pause)</span>
+          <span><strong>✊ Fist / other</strong> — Idle</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== TOOLBAR (Requirements 7, 8, 9) ===== -->
+    <aside class="toolbar">
+
+      <div class="tool-group">
+        <h3>Tool</h3>
+        <div class="tool-buttons">
+          <button id="penBtn" class="tool-btn active" title="Pen (P)">✏️ Pen</button>
+          <button id="eraserBtn" class="tool-btn" title="Eraser (E)">🧽 Eraser</button>
+        </div>
+      </div>
+
+      <div class="tool-group">
+        <h3>Color</h3>
+        <div class="palette" id="palette"><!-- swatches injected by script.js --></div>
+        <input type="color" id="colorPicker" value="#38bdf8" title="Custom color" />
+      </div>
+
+      <div class="tool-group">
+        <h3>Brush Size</h3>
+        <input type="range" id="brushSize" min="2" max="40" value="8" />
+        <div class="brush-preview-row">
+          <span id="brushSizeLabel">8px</span>
+          <span class="brush-preview" id="brushPreview"></span>
+        </div>
+      </div>
+
+      <div class="tool-group actions">
+        <h3>Actions</h3>
+        <div class="action-buttons">
+          <button id="undoBtn" title="Undo (Ctrl+Z)">↩️ Undo</button>
+          <button id="redoBtn" title="Redo (Ctrl+Y)">↪️ Redo</button>
+          <button id="clearBtn" title="Clear (C)">🗑️ Clear</button>
+          <button id="saveBtn" title="Download PNG">💾 Save</button>
+        </div>
+      </div>
+
+      <div class="tool-group tips">
+        <h3>Tips</h3>
+        <ul>
+          <li>Keep your hand ~40–80cm from the camera.</li>
+          <li>Hold your hand upright, fingers toward the top of the frame.</li>
+          <li>Good, even lighting improves tracking accuracy.</li>
+          <li>Only one hand is tracked at a time.</li>
+        </ul>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="footer">
+    <p>Built with HTML, CSS, JavaScript &amp; MediaPipe Hands · Runs 100% in your browser, no backend.</p>
+  </footer>
+
+  <!-- MediaPipe Hands (CDN) — must load before script.js -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="script.js"></script>
+</body>
+</html>
